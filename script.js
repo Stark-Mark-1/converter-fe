@@ -11,15 +11,12 @@ const CONFIG = {
    */
   R2_PUBLIC_BASE: 'https://pub-34559487076f43188d6bb330de590d69.r2.dev',
 
-  /** Polling interval for encoding status in ms */
-  POLL_INTERVAL: 3000,
 };
 
 // ─────────────────────────────────────────────────────────────
 // State
 // ─────────────────────────────────────────────────────────────
 let selectedFile = null;
-let pollTimer = null;
 let hlsInstance = null;
 
 // ─────────────────────────────────────────────────────────────
@@ -215,14 +212,20 @@ async function startConversion() {
     markProcStepDone(stepUploadDot, stepUpload);
     activateProcStep(stepEncodeDot);
 
-    // 3. Trigger encoding
+    // 3. Trigger encoding — backend is synchronous, wait for completion
+    encodeFill.classList.add('indeterminate');
+    encodePct.textContent = 'Encoding…';
+
     await triggerEncoding(videoId);
 
-    // 4. Poll until done
-    await pollUntilDone(videoId);
+    encodeFill.classList.remove('indeterminate');
+    encodeFill.style.width = '100%';
+    encodePct.textContent = '100%';
+    markProcStepDone(stepEncodeDot, stepEncode);
+
+    showResult(videoId);
 
   } catch (err) {
-    clearTimeout(pollTimer);
     showError(err.message || 'Something went wrong. Please try again.');
     hide(progressSection);
     show(uploadSection);
@@ -273,53 +276,13 @@ async function triggerEncoding(videoId) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ videoId }),
   });
-  if (!res.ok) throw new Error(`Failed to start encoding (${res.status})`);
+  const data = await res.json();
+  if (!res.ok || data.status === 'error') {
+    throw new Error(data.message || `Encoding failed (${res.status})`);
+  }
+  return data;
 }
 
-/**
- * Poll GET /status/{videoId} until done or error.
- * Response: { status: "pending"|"encoding"|"done"|"error", progress: 0-100, message?: string }
- */
-function pollUntilDone(videoId) {
-  return new Promise((resolve, reject) => {
-    async function check() {
-      try {
-        const res = await fetch(`${CONFIG.API_BASE}/status/${videoId}`);
-        if (!res.ok) throw new Error(`Status check failed (${res.status})`);
-
-        const { status, progress = 0, message } = await res.json();
-
-        if (status === 'done') {
-          encodeFill.classList.remove('indeterminate');
-          encodePct.textContent = '100%';
-          markProcStepDone(stepEncodeDot, stepEncode);
-          showResult(videoId);
-          resolve();
-
-        } else if (status === 'error') {
-          reject(new Error(message || 'Encoding failed on the server'));
-
-        } else if (status === 'encoding') {
-          encodeFill.classList.remove('indeterminate');
-          encodeFill.style.width = progress + '%';
-          encodePct.textContent = progress + '%';
-          pollTimer = setTimeout(check, CONFIG.POLL_INTERVAL);
-
-        } else {
-          // 'pending' — indeterminate sweep
-          encodeFill.classList.add('indeterminate');
-          encodePct.textContent = 'Queued…';
-          pollTimer = setTimeout(check, CONFIG.POLL_INTERVAL);
-        }
-
-      } catch (err) {
-        reject(err);
-      }
-    }
-
-    check();
-  });
-}
 
 // ─────────────────────────────────────────────────────────────
 // Result + Player
@@ -398,8 +361,6 @@ copyBtn.addEventListener('click', async () => {
 // Reset
 // ─────────────────────────────────────────────────────────────
 function resetState() {
-  clearTimeout(pollTimer);
-
   if (hlsInstance) { hlsInstance.destroy(); hlsInstance = null; }
   videoPlayer.src = '';
   hlsUrlInput.value = '';
