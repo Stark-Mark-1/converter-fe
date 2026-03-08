@@ -18,6 +18,7 @@ const CONFIG = {
 // ─────────────────────────────────────────────────────────────
 let selectedFile = null;
 let hlsInstance = null;
+let healthCheckInterval = null;
 
 // ─────────────────────────────────────────────────────────────
 // DOM refs
@@ -38,6 +39,7 @@ const fileName = $('file-name');
 const fileSize = $('file-size');
 const fileRemove = $('file-remove');
 const uploadBtn = $('upload-btn');
+const serverBusyMsg = $('server-busy-msg');
 
 const stepUpload = $('step-upload');
 const stepUploadDot = $('step-upload-dot');
@@ -61,6 +63,40 @@ const tracker2 = $('tracker-2');
 const tracker3 = $('tracker-3');
 const trackerLine1 = $('tracker-line-1');
 const trackerLine2 = $('tracker-line-2');
+
+// ─────────────────────────────────────────────────────────────
+// Health Check Polling
+// ─────────────────────────────────────────────────────────────
+async function checkHealth() {
+  try {
+    const res = await fetch(`${CONFIG.API_BASE}/health`);
+    if (res.ok) {
+      const data = await res.json();
+      if (data.availableSlots === 0) {
+        uploadBtn.disabled = true;
+        if (selectedFile) show(serverBusyMsg);
+      } else {
+        uploadBtn.disabled = false;
+        hide(serverBusyMsg);
+      }
+    }
+  } catch (err) {
+    // Ignore network errors for health check to avoid noise
+  }
+}
+
+function startHealthPolling() {
+  if (healthCheckInterval) return;
+  checkHealth(); // Check immediately
+  healthCheckInterval = setInterval(checkHealth, 5000);
+}
+
+function stopHealthPolling() {
+  if (healthCheckInterval) {
+    clearInterval(healthCheckInterval);
+    healthCheckInterval = null;
+  }
+}
 
 // ─────────────────────────────────────────────────────────────
 // Helpers
@@ -140,6 +176,11 @@ function handleFileSelect(file) {
     return;
   }
 
+  if (file.size > 100 * 1024 * 1024) {
+    showError('File exceeds the 100 MB limit. Please choose a smaller file.');
+    return;
+  }
+
   hideError();
   selectedFile = file;
 
@@ -154,6 +195,7 @@ function clearFile() {
   fileInput.value = '';
   hide(fileInfo);
   hide(uploadBtn);
+  hide(serverBusyMsg);
 }
 
 fileInput.addEventListener('change', (e) => handleFileSelect(e.target.files[0]));
@@ -189,6 +231,8 @@ async function startConversion() {
 
   hideError();
   uploadBtn.disabled = true;
+  hide(serverBusyMsg);
+  stopHealthPolling();
 
   hide(uploadSection);
   show(progressSection);
@@ -216,7 +260,22 @@ async function startConversion() {
     encodeFill.classList.add('indeterminate');
     encodePct.textContent = 'Encoding…';
 
-    await triggerEncoding(videoId);
+    let encodingSuccess = false;
+    while (!encodingSuccess) {
+      try {
+        await triggerEncoding(videoId);
+        encodingSuccess = true;
+      } catch (err) {
+        if (err.isBusy) {
+          encodePct.textContent = 'Server busy, waiting in queue...';
+          // Wait 5 seconds and retry
+          await new Promise(resolve => setTimeout(resolve, 5000));
+          encodePct.textContent = 'Retrying encoding...';
+        } else {
+          throw err;
+        }
+      }
+    }
 
     encodeFill.classList.remove('indeterminate');
     encodeFill.style.width = '100%';
@@ -231,6 +290,7 @@ async function startConversion() {
     show(uploadSection);
     setActiveStep(1);
     uploadBtn.disabled = false;
+    startHealthPolling();
   }
 }
 
@@ -276,6 +336,14 @@ async function triggerEncoding(videoId) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ videoId }),
   });
+
+  if (res.status === 429) {
+    const errorData = await res.json().catch(() => ({}));
+    const err = new Error(errorData.message || 'Server currently processing maximum number of videos');
+    err.isBusy = true;
+    throw err;
+  }
+
   const data = await res.json();
   if (!res.ok || data.status === 'error') {
     throw new Error(data.message || `Encoding failed (${res.status})`);
@@ -390,11 +458,13 @@ function resetState() {
 
   hide(fileInfo);
   hide(uploadBtn);
+  hide(serverBusyMsg);
   hide(progressSection);
   hide(resultSection);
   hideError();
   show(uploadSection);
   setActiveStep(1);
+  startHealthPolling();
 }
 
 retryBtn.addEventListener('click', resetState);
@@ -402,3 +472,4 @@ newBtn.addEventListener('click', resetState);
 
 // Initialise tracker
 setActiveStep(1);
+startHealthPolling();
