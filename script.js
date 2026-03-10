@@ -186,6 +186,7 @@ function handleFileSelect(file) {
 
   fileName.textContent = file.name;
   fileSize.textContent = formatBytes(file.size);
+  hide(dropZone);
   show(fileInfo);
   show(uploadBtn);
 }
@@ -196,9 +197,17 @@ function clearFile() {
   hide(fileInfo);
   hide(uploadBtn);
   hide(serverBusyMsg);
+  show(dropZone);
 }
 
-fileInput.addEventListener('change', (e) => handleFileSelect(e.target.files[0]));
+fileInput.addEventListener('change', (e) => {
+  if (e.target.files.length > 1) {
+    showError('Please select only one video at a time.');
+    fileInput.value = '';
+    return;
+  }
+  handleFileSelect(e.target.files[0]);
+});
 fileRemove.addEventListener('click', (e) => { e.stopPropagation(); clearFile(); });
 
 // ── Drop Zone ──
@@ -218,6 +227,10 @@ dropZone.addEventListener('dragleave', (e) => {
 dropZone.addEventListener('drop', (e) => {
   e.preventDefault();
   dropZone.classList.remove('drag-over');
+  if (e.dataTransfer.files.length > 1) {
+    showError('Please select only one video at a time.');
+    return;
+  }
   handleFileSelect(e.dataTransfer.files[0]);
 });
 
@@ -463,6 +476,7 @@ function resetState() {
   hide(resultSection);
   hideError();
   show(uploadSection);
+  show(dropZone);
   setActiveStep(1);
   startHealthPolling();
 }
