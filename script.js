@@ -3,7 +3,7 @@
 // ─────────────────────────────────────────────────────────────
 const CONFIG = {
   /** Backend API base URL (no trailing slash) */
-  API_BASE: 'https://converter-be-268082701906.asia-south1.run.app',
+  API_BASE: 'https://dystreamerapi.wavelaps.com',
 
   /**
    * R2 public bucket base URL (no trailing slash).
@@ -19,6 +19,7 @@ const CONFIG = {
 let selectedFile = null;
 let hlsInstance = null;
 let healthCheckInterval = null;
+let queuePollInterval = null;
 
 // ─────────────────────────────────────────────────────────────
 // DOM refs
@@ -39,7 +40,10 @@ const fileName = $('file-name');
 const fileSize = $('file-size');
 const fileRemove = $('file-remove');
 const uploadBtn = $('upload-btn');
-const serverBusyMsg = $('server-busy-msg');
+// Queue position banner elements
+const queueBanner = $('queue-banner');
+const queuePos = $('queue-pos');
+const queueLen = $('queue-len');
 
 const stepUpload = $('step-upload');
 const stepUploadDot = $('step-upload-dot');
@@ -70,18 +74,11 @@ const trackerLine2 = $('tracker-line-2');
 async function checkHealth() {
   try {
     const res = await fetch(`${CONFIG.API_BASE}/health`);
-    if (res.ok) {
-      const data = await res.json();
-      if (data.availableSlots === 0) {
-        uploadBtn.disabled = true;
-        if (selectedFile) show(serverBusyMsg);
-      } else {
-        uploadBtn.disabled = false;
-        hide(serverBusyMsg);
-      }
-    }
-  } catch (err) {
-    // Ignore network errors for health check to avoid noise
+    // Health check is now purely informational — the server queues all jobs
+    // so we never disable the upload button based on slot availability.
+    void res;
+  } catch (_) {
+    // Ignore network errors
   }
 }
 
@@ -196,7 +193,6 @@ function clearFile() {
   fileInput.value = '';
   hide(fileInfo);
   hide(uploadBtn);
-  hide(serverBusyMsg);
   show(dropZone);
 }
 
@@ -244,7 +240,6 @@ async function startConversion() {
 
   hideError();
   uploadBtn.disabled = true;
-  hide(serverBusyMsg);
   stopHealthPolling();
 
   hide(uploadSection);
@@ -269,26 +264,14 @@ async function startConversion() {
     markProcStepDone(stepUploadDot, stepUpload);
     activateProcStep(stepEncodeDot);
 
-    // 3. Trigger encoding — backend is synchronous, wait for completion
+    // 3. Trigger encoding — server holds the connection open until done (queue-backed).
+    //    Poll /queue-position in parallel to show live position to the user.
     encodeFill.classList.add('indeterminate');
     encodePct.textContent = 'Encoding…';
 
-    let encodingSuccess = false;
-    while (!encodingSuccess) {
-      try {
-        await triggerEncoding(videoId);
-        encodingSuccess = true;
-      } catch (err) {
-        if (err.isBusy) {
-          encodePct.textContent = 'Server busy, waiting in queue...';
-          // Wait 5 seconds and retry
-          await new Promise(resolve => setTimeout(resolve, 5000));
-          encodePct.textContent = 'Retrying encoding...';
-        } else {
-          throw err;
-        }
-      }
-    }
+    startQueuePolling(videoId);
+    await triggerEncoding(videoId);
+    stopQueuePolling();
 
     encodeFill.classList.remove('indeterminate');
     encodeFill.style.width = '100%';
@@ -298,6 +281,7 @@ async function startConversion() {
     showResult(videoId);
 
   } catch (err) {
+    stopQueuePolling();
     showError(err.message || 'Something went wrong. Please try again.');
     hide(progressSection);
     show(uploadSection);
@@ -342,26 +326,85 @@ function uploadToR2(url, file, onProgress) {
   });
 }
 
-/** POST /encode  { videoId } */
+/** POST /encode  { videoId }
+ *  The server now holds the HTTP connection open until the job completes
+ *  (no 429 — requests are queued server-side). We give it up to 10 minutes.
+ */
 async function triggerEncoding(videoId) {
-  const res = await fetch(`${CONFIG.API_BASE}/encode`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ videoId }),
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10 * 60 * 1000); // 10 min
 
-  if (res.status === 429) {
-    const errorData = await res.json().catch(() => ({}));
-    const err = new Error(errorData.message || 'Server currently processing maximum number of videos');
-    err.isBusy = true;
+  try {
+    const res = await fetch(`${CONFIG.API_BASE}/encode`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ videoId }),
+      signal: controller.signal,
+    });
+
+    const data = await res.json();
+    if (!res.ok || data.status === 'error') {
+      throw new Error(data.message || `Encoding failed (${res.status})`);
+    }
+    return data;
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      throw new Error('Encoding timed out after 10 minutes. Please try again.');
+    }
     throw err;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// Queue Position Polling
+// ─────────────────────────────────────────────────────────────
+
+/** Show the queue banner with the latest position data */
+function updateQueueBanner(status, position, length) {
+  if (status === 'queued') {
+    queuePos.textContent = position;
+    queueLen.textContent = length;
+    encodePct.textContent = `Queue position ${position}`;
+    show(queueBanner);
+  } else if (status === 'processing') {
+    hide(queueBanner);
+    encodePct.textContent = 'Encoding…';
+  }
+}
+
+/** Start polling GET /queue-position?jobId=<videoId> every 3 s */
+function startQueuePolling(videoId) {
+  if (queuePollInterval) return;
+
+  async function poll() {
+    try {
+      const res = await fetch(`${CONFIG.API_BASE}/queue-position?jobId=${encodeURIComponent(videoId)}`);
+      if (res.status === 404) {
+        // Job finished — /encode will resolve imminently; just clear the banner
+        stopQueuePolling();
+        return;
+      }
+      if (!res.ok) return; // transient error, try next tick
+      const data = await res.json();
+      updateQueueBanner(data.status, data.position, data.queueLength);
+    } catch (_) {
+      // Network blip — silently ignore, try again next tick
+    }
   }
 
-  const data = await res.json();
-  if (!res.ok || data.status === 'error') {
-    throw new Error(data.message || `Encoding failed (${res.status})`);
+  poll(); // immediate first check
+  queuePollInterval = setInterval(poll, 3000);
+}
+
+/** Stop polling and hide the queue banner */
+function stopQueuePolling() {
+  if (queuePollInterval) {
+    clearInterval(queuePollInterval);
+    queuePollInterval = null;
   }
-  return data;
+  hide(queueBanner);
 }
 
 
@@ -471,7 +514,6 @@ function resetState() {
 
   hide(fileInfo);
   hide(uploadBtn);
-  hide(serverBusyMsg);
   hide(progressSection);
   hide(resultSection);
   hideError();

@@ -143,10 +143,6 @@
         Upload &amp; Convert
       </button>
 
-      <p id="server-busy-msg" class="hidden"
-        style="color: #f59e0b; margin-top: 1rem; text-align: center; font-size: 0.9rem;">
-        The encoding service is currently processing the maximum number of videos. Please wait a moment...
-      </p>
     </section>
 
     <!-- ── ② Processing ── -->
@@ -202,6 +198,11 @@
             </div>
             <div class="proc-bar">
               <div class="proc-fill indeterminate" id="encode-fill"></div>
+            </div>
+            <!-- Queue position banner (shown only while queued) -->
+            <div id="queue-banner" class="queue-banner hidden" role="status" aria-live="polite">
+              <svg viewBox="0 0 20 20" fill="currentColor" width="14" height="14" aria-hidden="true"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-12a1 1 0 10-2 0v4a1 1 0 00.293.707l2.828 2.829a1 1 0 101.415-1.415L11 9.586V6z" clip-rule="evenodd"/></svg>
+              <span id="queue-status-text">Queued — position <strong id="queue-pos">…</strong> of <strong id="queue-len">…</strong></span>
             </div>
           </div>
         </div>

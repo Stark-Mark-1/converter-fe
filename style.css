@@ -613,6 +613,28 @@ body {
   100% { transform: translateX(450%); }
 }
 
+/* ─── Queue Banner ───────────────────────────────────────────── */
+.queue-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.65rem;
+  padding: 0.45rem 0.75rem;
+  background: rgba(245 158 11 / 0.08);
+  border: 1px solid rgba(245 158 11 / 0.22);
+  border-radius: 6px;
+  color: #f59e0b;
+  font-size: 0.78rem;
+  animation: fadeUp 0.3s ease;
+}
+.queue-banner svg {
+  flex-shrink: 0;
+  opacity: 0.85;
+}
+.queue-banner strong {
+  font-weight: 700;
+}
+
 /* ─── Result / Success ───────────────────────────────────────── */
 .success-top {
   display: flex;
